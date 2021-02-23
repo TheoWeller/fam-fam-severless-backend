@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  fan-fam-backend
+
+Transform:
+- AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    # Environment:
+    #   Variables:
+        # TABLE_NAME: !Ref DemoTables
+Parameters:
+  AccountSid:
+    Type: String
+    Default: XXXXXX
+  AuthToken:
+    Type: String
+    Default: XXXXXX
+  NodeIpLocateLayerArn:
+    Type: String
+    Default: XXXXXX
+  TwilioNodeLibrary:
+    Type: String
+    Default: XXXXXX
+  NanoIdLibrary:
+    Type: String
+    Default: XXXXXX
+  IpLocateApiKey:
+    Type: String
+    Default: XXXXXX
+  GeneratedUrl:
+    Type: String
+    Default: XXXXXX
+
+Resources:     
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: DEV
+      Cors: "'*'"
+  
+  DemoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DemoTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes: 
+        - IndexName: GSI1LNK
+          KeySchema: 
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY    
+  
+  # LAMBDA FUNCTIONS
+  GetUserData:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/GetUserDataFunction.GetUserDataHandler
+      MemorySize: 256
+      Timeout: 60
+      Description: Retreives user data from DynamoDB.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DemoTable
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AmazonDynamoDBFullAccess
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /get-user-data
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+    
+  GetAvailableNumbers:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/GetAvailableNumbersFunction.GetAvailableNumbersHandler
+      MemorySize: 256
+      Timeout: 60
+      Description: Gets available Twilio numbers and creates new user resources.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DemoTable
+          ACCOUNT_SID: !Ref AccountSid
+          AUTH_TOKEN: !Ref AuthToken
+          DEMO_EXP_ARN: !GetAtt DemoExpiration.Arn
+          SMS_ENDPOINT:  XXXXXX
+          SMS_ENDPOINT_FALLBACK:  XXXXXX
+          STATUS_CALLBACK_ENDPOINT:  XXXXXX
+          IOT_POLICY_NAME: demo-user-policy
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /get-available-numbers
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+      Layers:
+        - !Ref TwilioNodeLibrary
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AmazonDynamoDBFullAccess
+        - AmazonEventBridgeFullAccess
+        - Statement:
+          - Sid: IoTpermissions
+            Effect: Allow
+            Action:
+            - iot:AttachPolicy
+            Resource: "*"
+
+  DemoExpiration:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/DemoExpirationFunction.DemoExpirationHandler
+      MemorySize: 256
+      Timeout: 60
+      Description: Deactivates demo user - invoked by CW Event.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DemoTable
+          ACCOUNT_SID: !Ref AccountSid
+          AUTH_TOKEN: !Ref AuthToken
+          SMS_ENDPOINT:  XXXXXX
+      Layers:
+        - !Ref TwilioNodeLibrary
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AmazonDynamoDBFullAccess
+        - AmazonEventBridgeFullAccess
+        - Statement:
+          - Sid: CognitoUpdatePolicy
+            Effect: Allow
+            Action:
+            - cognito-idp:AdminUpdateUserAttributes
+            Resource: XXXXXX
+
+  KeywordConsumer:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/KeywordConsumerFunction.KeywordConsumerHandler
+      MemorySize: 256
+      Timeout: 100
+      Description: Receives and processes incoming sms.
+      Environment:
+        Variables:
+          ACCOUNT_SID: !Ref AccountSid
+          AUTH_TOKEN: !Ref AuthToken
+          TABLE_NAME: !Ref DemoTable
+          IOT_ENDPOINT: XXXXXX
+          LINK_ENTITY_URL_ENDPOINT: !Ref GeneratedUrl
+      Tags:
+        TWILIO: Consumer
+        SMS: Consumer
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /sms/{proxy+}
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+      Layers:
+        - !Ref TwilioNodeLibrary
+        - !Ref NanoIdLibrary
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AmazonDynamoDBFullAccess
+        - Statement:
+          - Sid: IoTpermissions
+            Effect: Allow
+            Action:
+            - iot:Connect
+            - iot:Publish
+            - iot:Subscribe
+            Resource: "*"
+  
+  LinkClickConsumer:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/LinkConsumerFunction.LinkConsumerHandler
+      MemorySize: 256
+      Timeout: 100
+      Description: Records link clicks and redirects to origional link.
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DemoTable
+          IP_LOCATE_API_KEY: !Ref IpLocateApiKey
+          SQS_LINK_CLICK_QUEUE_URL: !Ref LinkClickSqsQueue
+
+      Tags:
+        Link: Consumer
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /link/{proxy+}
+            Method: GET
+            RestApiId:
+              Ref: ApiGatewayApi
+      Layers:
+        - !Ref NodeIpLocateLayerArn
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AmazonDynamoDBFullAccess
+        - Statement:
+          - Sid: SQSprocessorPermissions
+            Effect: Allow
+            Action:
+            - sqs:SendMessage
+            Resource: "*"
+  
+  LinkClickSqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: LinkClickSqsQueue
+      VisibilityTimeout: 600 #set 6 times greater than processor function to allow for processing time
+      ReceiveMessageWaitTimeSeconds: 10 #Max = 20 (Long polling)     
+        
+  CreateKeyword:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handlers/CreateKeywordFunction.CreateKeywordHandler
+      MemorySize: 256
+      Timeout: 100
+      Description: Creates keywords
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DemoTable
+          LINK_CONSUMER_ENDPOINT: PLACEHOLDER
+      Tags:
+        Link: Create
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /create-keyword
+            Method: POST
+            RestApiId:
+              Ref: ApiGatewayApi
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AmazonDynamoDBFullAccess
